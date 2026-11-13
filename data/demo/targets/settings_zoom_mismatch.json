@@ -1,0 +1,11 @@
+{
+  "device": "合成相机 A",
+  "lens": "合成镜头 50mm",
+  "aperture": "f/8",
+  "focalLengthMm": 50,
+  "zoom": 2,
+  "binning": 1,
+  "focusDn": 320,
+  "iso": 100,
+  "exposureMs": 10
+}

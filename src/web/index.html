@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>平场补偿 · 图像恢复窗口</title>
+<link rel="stylesheet" href="/web/styles.css">
+</head>
+<body>
+<div class="app" id="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <div>
+        <h1>平场补偿</h1>
+        <p>固定拍摄装置 · 参考组标定 → 可信区域恢复</p>
+      </div>
+    </div>
+    <div class="topbar-status" id="statusBar">
+      <span class="status-dot" id="statusDot"></span>
+      <span id="statusText">等待标定</span>
+    </div>
+    <div class="topbar-actions">
+      <button type="button" class="ghost" id="demoButton">载入演示参考组</button>
+      <button type="button" class="ghost" id="validateButton">合成验证</button>
+      <button type="button" class="primary" id="calibrateButton">估计增益</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="panel panel-left">
+      <section class="section">
+        <h2>参考组</h2>
+        <p class="hint" id="referenceHint">选择同一装置、同一采集设置下的均匀参考图。参考图自身的噪声、坏点和饱和会被逐像素评估，不会直接当作增益。</p>
+        <div class="source-switch" role="tablist" aria-label="参考图来源">
+          <button type="button" class="seg active" data-source="demo" role="tab" aria-selected="true">演示数据</button>
+          <button type="button" class="seg" data-source="upload" role="tab" aria-selected="false">上传文件</button>
+        </div>
+        <div id="demoReferenceList" class="file-list"></div>
+        <div id="uploadReferenceArea" class="file-list hidden">
+          <label class="dropzone" id="refDropzone">
+            <span>拖入或点击选择多张 8/16 位 PNG 参考图</span>
+            <input type="file" id="refFileInput" accept="image/png" multiple hidden>
+          </label>
+          <div id="refUploads" class="upload-list"></div>
+        </div>
+        <div class="field-row">
+          <label for="referenceSettings">采集设置 JSON</label>
+          <textarea id="referenceSettings" rows="7" spellcheck="false" class="mono"></textarea>
+        </div>
+        <p class="hint">必填：device、lens、aperture、focalLengthMm、zoom、binning。目标图与这些值不一致时会拒绝套用。</p>
+      </section>
+
+      <section class="section">
+        <h2>暗电平与归一基准</h2>
+        <div id="radiometryFields" class="field-grid"></div>
+      </section>
+
+      <section class="section">
+        <h2>增益与可信度</h2>
+        <div id="gainFields" class="field-grid"></div>
+      </section>
+
+      <section class="section">
+        <h2>目标图</h2>
+        <div class="source-switch" role="tablist" aria-label="目标图来源">
+          <button type="button" class="seg active" data-target="demo" role="tab" aria-selected="true">演示目标</button>
+          <button type="button" class="seg" data-target="upload" role="tab" aria-selected="false">上传文件</button>
+        </div>
+        <div id="demoTargetList" class="file-list"></div>
+        <div id="uploadTargetArea" class="file-list hidden">
+          <label class="dropzone" id="targetDropzone">
+            <span>拖入或点击选择一张 8/16 位 PNG 目标图</span>
+            <input type="file" id="targetFileInput" accept="image/png" hidden>
+          </label>
+          <div id="targetUploads" class="upload-list"></div>
+        </div>
+        <div class="field-row">
+          <label for="targetSettingsVariant">目标采集设置</label>
+          <select id="targetSettingsVariant">
+            <option value="match">与标定一致</option>
+            <option value="zoom">变焦不一致（应拒绝）</option>
+            <option value="iso">ISO 不一致（默认仅告警）</option>
+          </select>
+        </div>
+        <p class="hint">尺寸、通道或必填采集设置不一致时，内核会拒绝套用并在右侧给出原因。</p>
+      </section>
+    </aside>
+
+    <section class="panel panel-right">
+      <div class="viewer-toolbar">
+        <h2>结果区</h2>
+        <div class="viewer-modes" role="radiogroup" aria-label="显示模式">
+          <button type="button" class="seg active" data-view="split" aria-pressed="true">校正前后</button>
+          <button type="button" class="seg" data-view="corrected" aria-pressed="false">补偿图像</button>
+          <button type="button" class="seg" data-view="trust" aria-pressed="false">可信区域</button>
+          <button type="button" class="seg" data-view="gain" aria-pressed="false">增益场</button>
+        </div>
+      </div>
+
+      <div class="viewer" id="viewer">
+        <div class="viewer-empty" id="viewerEmpty">
+          <div class="empty-art" aria-hidden="true"></div>
+          <h3>尚未生成补偿结果</h3>
+          <p>先选择参考组并点击“估计增益”，再选择目标图。</p>
+        </div>
+        <div class="viewer-grid" id="viewerGrid">
+          <figure class="image-card">
+            <figcaption><span id="leftCaption">校正前</span><span class="badge" id="leftBadge"></span></figcaption>
+            <div class="image-frame" id="leftFrame"><img id="leftImage" alt="校正前图像" hidden></div>
+          </figure>
+          <figure class="image-card">
+            <figcaption><span id="rightCaption">校正后</span><span class="badge" id="rightBadge"></span></figcaption>
+            <div class="image-frame" id="rightFrame"><img id="rightImage" alt="校正后图像" hidden></div>
+          </figure>
+        </div>
+        <div class="viewer-overlay" id="viewerOverlay"></div>
+      </div>
+
+      <div class="legend" id="legend">
+        <span><i class="dot trusted"></i>可信区</span>
+        <span><i class="dot low"></i>可信度不足</span>
+        <span><i class="dot capped"></i>倍率封顶</span>
+        <span><i class="dot dark"></i>低照度/接近暗电平</span>
+        <span><i class="dot bad"></i>坏点/饱和</span>
+      </div>
+
+      <div class="metrics" id="metrics">
+        <article class="metric">
+          <span class="metric-label">可信像素</span>
+          <span class="metric-value" id="metricTrust">—</span>
+          <span class="metric-note" id="metricTrustNote">标定后显示</span>
+        </article>
+        <article class="metric">
+          <span class="metric-label">平均补偿倍率</span>
+          <span class="metric-value" id="metricGain">—</span>
+          <span class="metric-note">仅统计可信区</span>
+        </article>
+        <article class="metric">
+          <span class="metric-label">最大放大（实际）</span>
+          <span class="metric-value" id="metricMaxGain">—</span>
+          <span class="metric-note" id="metricMaxGainNote">受最大倍率限制</span>
+        </article>
+        <article class="metric">
+          <span class="metric-label">噪声放大</span>
+          <span class="metric-value" id="metricNoise">—</span>
+          <span class="metric-note">区域高通过程估计</span>
+        </article>
+      </div>
+
+      <section class="section result-section">
+        <div class="section-head">
+          <h2>相同区域数值剖面</h2>
+          <div class="section-tools">
+            <label for="profileRow">剖面行</label>
+            <input id="profileRow" type="range" min="0" max="100" value="55">
+            <span class="mono" id="profileRowLabel">y = —</span>
+          </div>
+        </div>
+        <div class="profile-wrap">
+          <canvas id="profileChart" height="180" aria-label="校正前后同一行数值剖面"></canvas>
+          <div class="profile-values" id="profileValues"></div>
+        </div>
+      </section>
+
+      <section class="section result-section">
+        <div class="section-head">
+          <h2>区域对照</h2>
+          <span class="hint">同一坐标的均值与噪声，校正前 → 校正后</span>
+        </div>
+        <table class="region-table" id="regionTable">
+          <thead>
+            <tr><th>区域</th><th>均值变化</th><th>噪声变化</th><th>可信度</th></tr>
+          </thead>
+          <tbody><tr><td colspan="4" class="empty-cell">暂无结果</td></tr></tbody>
+        </table>
+      </section>
+
+      <section class="section result-section">
+        <div class="section-head">
+          <h2>导出</h2>
+          <div class="section-tools">
+            <button type="button" class="ghost" id="selectAllTargets">全选目标</button>
+            <button type="button" class="primary" id="exportButton">批量导出</button>
+          </div>
+        </div>
+        <div id="exportTargetList" class="file-list compact"></div>
+        <div id="exportResults" class="export-results" role="status" aria-live="polite"></div>
+      </section>
+    </section>
+  </main>
+
+  <section class="panel panel-bottom" id="diagnostics">
+    <div class="diagnostic-head">
+      <h2>标定诊断</h2>
+      <span class="hint" id="diagnosticHint">运行“估计增益”后显示参考组的逐帧统计、限幅比例与告警。</span>
+    </div>
+    <div class="diagnostic-body">
+      <div class="diagnostic-charts">
+        <figure class="chart-card">
+          <figcaption>参考组均值 / 噪声</figcaption>
+          <canvas id="frameChart" height="150"></canvas>
+        </figure>
+        <figure class="chart-card">
+          <figcaption>增益场分布（可信区）</figcaption>
+          <canvas id="gainChart" height="150"></canvas>
+        </figure>
+      </div>
+      <div class="diagnostic-text" id="diagnosticText"></div>
+    </div>
+  </section>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</div>
+<script type="module" src="/web/app.js"></script>
+</body>
+</html>
