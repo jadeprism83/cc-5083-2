@@ -22,6 +22,10 @@ const DEFAULTS = {
   confidenceThreshold: 0.5,
   requireRadiometryMatch: false,
   radiometryTolerance: 0.05,
+  gainModel: 'grid', // 'field' 稠密场 | 'grid' 网格插值（默认，见 docs/gain-model-comparison.md）| 'basis' 受约束基函数
+  gridCellPx: 8,
+  basisDegree: 4,
+  basisResidualSigma: 4,
 };
 
 // Fields are the advanced controls; groups control UI placement.
@@ -103,6 +107,30 @@ const FIELDS = [
     min: 0.2, max: 0.95, step: 0.01,
   },
   {
+    key: 'gainModel', label: '增益模型', group: 'model', type: 'select',
+    options: [
+      { value: 'field', label: '稠密场（逐像素，基线）' },
+      { value: 'grid', label: '网格插值（控制点 + 双线性）' },
+      { value: 'basis', label: '受约束基函数（log 多项式）' },
+    ],
+    help: '三种表示共用同一观测与可信度模型；区别在增益场的存储与展开方式。网格在缺邻点时按跳数退化并降权，基函数无法表达的细小遮光会被标记为 MODEL_UNFIT 而不强行校正。',
+  },
+  {
+    key: 'gridCellPx', label: '网格间距', group: 'model', type: 'range',
+    min: 8, max: 128, step: 4, unit: 'px',
+    help: '仅网格模型：控制点间距。过小会过拟合单帧噪声，过大会丢失局部遮光。',
+  },
+  {
+    key: 'basisDegree', label: '基函数阶数', group: 'model', type: 'range',
+    min: 1, max: 6, step: 1, unit: '阶',
+    help: '仅基函数模型：log 增益的二维多项式总阶数，带岭正则与 IRLS 抗离群。',
+  },
+  {
+    key: 'basisResidualSigma', label: '基函数残差阈值', group: 'model', type: 'range',
+    min: 2, max: 10, step: 0.5, unit: 'σ',
+    help: '仅基函数模型：观测增益与模型偏差超过该倍数时标记 MODEL_UNFIT 并降低可信度，不对这些像素强行校正。',
+  },
+  {
     key: 'requireRadiometryMatch', label: '同时要求 ISO/曝光一致', group: 'trust', type: 'select', inline: true,
     options: [
       { value: false, label: '否（仅要求几何与装置设置一致）' },
@@ -143,12 +171,17 @@ function validateOptions(input) {
     outlierSigma: [1, 12], minValidFrames: [1, 64], deadPixelFraction: [0.05, 1],
     badPixelSigma: [2, 100], confidenceThreshold: [0.1, 0.99],
     radiometryTolerance: [0, 0.5],
+    gridCellPx: [8, 512], basisResidualSigma: [1.5, 20],
   };
   for (const [key, [lo, hi]] of Object.entries(numbers)) {
     const v = out[key];
     if (typeof v !== 'number' || !Number.isFinite(v)) errors.push(`${key} 必须是数值`);
     else if (v < lo || v > hi) errors.push(`${key} 超出允许范围 [${lo}, ${hi}]`);
   }
+  if (!Number.isInteger(out.basisDegree) || out.basisDegree < 1 || out.basisDegree > 6) {
+    errors.push('basisDegree 必须是 1..6 的整数');
+  }
+  if (!['field', 'grid', 'basis'].includes(out.gainModel)) errors.push('gainModel 非法');
   if (out.maxGain < 1) errors.push('maxGain 必须不小于 1');
   if (!['none', 'manual', 'darkFrames'].includes(out.darkMode)) errors.push('darkMode 非法');
   if (!['mean', 'median', 'percentile', 'fixed'].includes(out.normalizationMode)) {

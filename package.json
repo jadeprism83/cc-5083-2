@@ -7,9 +7,11 @@
   "scripts": {
     "start": "node src/server.js",
     "cli": "node src/cli.js",
-    "test": "node --test tests/kernel.test.js",
+    "test": "node --test tests/kernel.test.js tests/gainmodel.test.js",
     "demo": "node tools/make-demo.js",
-    "validate": "node src/cli.js validate --out exports/validation"
+    "validate": "node src/cli.js validate --out exports/validation",
+    "compare": "node tools/compare-gain-models.js",
+    "recompute": "node tools/recompute-metrics.js"
   },
   "engines": {
     "node": ">=18"

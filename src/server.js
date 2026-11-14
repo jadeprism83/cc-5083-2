@@ -145,6 +145,8 @@ function flagsPng(calibration) {
     else if (f & 2) { r = 220; g = 60; b = 60; } // saturated
     else if (f & 4) { r = 230; g = 150; b = 40; } // bad pixel
     else if (f & 8) { r = 220; g = 210; b = 60; } // low signal
+    else if (f & 16) { r = 200; g = 80; b = 200; } // basis cannot express (MODEL_UNFIT)
+    else if (f & 32) { r = 60; g = 160; b = 220; } // grid node filled from neighbours
     else if (f & 64) { r = 80; g = 150; b = 200; } // filled
     else { r = 30; g = 120; b = 70; } // trusted
     data[p * 3] = r;
@@ -179,6 +181,7 @@ function calibrationSummary(calibration) {
     darkSource: r.darkSource,
     saturationThresholdDn: r.saturationThresholdDn,
     normalization: r.normalization,
+    gainModel: r.gainModel || { kind: 'field', label: '稠密场', note: 'schemaVersion 3 标定' },
     gainPolicy: r.gainPolicy,
     refinement: r.refinement,
     options: r.options,
@@ -190,6 +193,34 @@ function calibrationSummary(calibration) {
     channelStatistics: r.channelStatistics,
     frameReports: r.frameReports,
   };
+}
+
+// Anomalies tied to the compensated image and the trusted region. Surfaced in
+// the UI next to the run status so a bad calibration never fails silently.
+function collectAnomalies(record, application, pixelCount) {
+  const anomalies = [];
+  const c = application.counts;
+  const fraction = (n) => (pixelCount ? n / pixelCount : 0);
+  if (fraction(c.gainCapped) > 0.001) {
+    anomalies.push({ level: 'warn', key: 'GAIN_CAPPED', text: `${(fraction(c.gainCapped) * 100).toFixed(2)}% 像素达到最大补偿倍率（增益被封顶）` });
+  }
+  if (fraction(c.underDark) > 0.001) {
+    anomalies.push({ level: 'info', key: 'TARGET_UNDER_DARK', text: `${(fraction(c.underDark) * 100).toFixed(2)}% 像素低于暗电平，原样输出未放大` });
+  }
+  if (fraction(c.clipped) > 0.001) {
+    anomalies.push({ level: 'warn', key: 'TARGET_CLIPPED', text: `${(fraction(c.clipped) * 100).toFixed(2)}% 目标像素已饱和，补偿无法恢复` });
+  }
+  if (application.trustedFraction < 0.8) {
+    anomalies.push({ level: 'warn', key: 'TRUST_LOW', text: `可信区域仅 ${(application.trustedFraction * 100).toFixed(1)}%，请检查参考组质量或可信度阈值` });
+  }
+  const model = record && record.gainModel ? record.gainModel : null;
+  if (model && model.kind === 'basis' && model.unfitFraction > 0.01) {
+    anomalies.push({ level: 'info', key: 'MODEL_UNFIT', text: `基函数模型无法表达 ${(model.unfitFraction * 100).toFixed(1)}% 像素的局部遮光（MODEL_UNFIT，校正已衰减）` });
+  }
+  if (model && model.kind === 'grid' && model.degradedPixelFraction > 0.01) {
+    anomalies.push({ level: 'info', key: 'GRID_DEGRADED', text: `稀疏无效区使 ${(model.degradedPixelFraction * 100).toFixed(1)}% 像素的网格节点由邻点填充（GRID_DEGRADED）` });
+  }
+  return anomalies;
 }
 
 function loadCalibrationById(id) {
@@ -304,6 +335,11 @@ async function handleCalibrate(body) {
 
   const display = { gain: null };
   display.gain = normalizedGainImage(calibration);
+  const pixelCount = calibration.width * calibration.height;
+  const anomalies = collectAnomalies(calibration.record, {
+    counts: {},
+    trustedFraction: calibration.record.summary ? calibration.record.summary.trustedFraction : 1,
+  }, pixelCount);
   return {
     status: 200,
     value: {
@@ -316,6 +352,7 @@ async function handleCalibrate(body) {
       trustImage: trustMaskPng(calibration),
       flagLabels: FLAG_LABELS,
       applyFlagLabels: APPLY_FLAG_LABELS,
+      anomalies,
       warnings: result.warnings,
     },
   };
@@ -460,6 +497,7 @@ async function handlePreview(body) {
       regions: regionReports,
       noise: regionNoise,
       profile,
+      anomalies: collectAnomalies(calibration.record, application, target.width * target.height),
       application: {
         threshold: application.threshold,
         trustedFraction: application.trustedFraction,
@@ -676,6 +714,10 @@ async function handleValidate(body) {
     application: validation.application,
     gainAccuracy: validation.gainAccuracy,
     uniformity: validation.uniformity,
+    heldOut: validation.heldOut,
+    texture: validation.texture,
+    lowLight: validation.lowLight,
+    timing: validation.timing,
     regions: validation.regions,
     checks: validation.checks,
     profiles,

@@ -162,11 +162,15 @@ function buildScenario(params = {}) {
   };
   const saturationLevel = params.saturationLevel ?? fullScale;
   const darkLevel = params.darkLevel ?? (bitDepth === 8 ? 4 : 700);
-  const hotPixels = params.hotPixels ?? params.disableDefects ? null : DEFAULT_HOT_PIXELS;
-  const saturatedPatch = params.saturatedPatch ?? params.disableDefects ? null : {
-    x: Math.round(geometry.width * 0.84), y: Math.round(geometry.height * 0.1),
-    w: Math.round(geometry.width * 0.07), h: Math.round(geometry.height * 0.1),
-  };
+  const hotPixels = params.hotPixels !== undefined
+    ? params.hotPixels
+    : (params.disableDefects ? null : DEFAULT_HOT_PIXELS);
+  const saturatedPatch = params.saturatedPatch !== undefined
+    ? params.saturatedPatch
+    : (params.disableDefects ? null : {
+      x: Math.round(geometry.width * 0.84), y: Math.round(geometry.height * 0.1),
+      w: Math.round(geometry.width * 0.07), h: Math.round(geometry.height * 0.1),
+    });
   const referenceRand = rng(params.referenceSeed || 11);
   const refs = [];
   const refTruths = [];

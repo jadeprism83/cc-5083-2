@@ -62,6 +62,12 @@
       </section>
 
       <section class="section">
+        <h2>增益模型</h2>
+        <p class="hint">网格插值为默认（对比实验见 docs/gain-model-comparison.md）；基函数无法表达的细小遮光会被标记 MODEL_UNFIT 而不强行校正，网格缺邻点时按跳数退化并标记 GRID_DEGRADED。</p>
+        <div id="modelFields" class="field-grid"></div>
+      </section>
+
+      <section class="section">
         <h2>目标图</h2>
         <div class="source-switch" role="tablist" aria-label="目标图来源">
           <button type="button" class="seg active" data-target="demo" role="tab" aria-selected="true">演示目标</button>
@@ -124,6 +130,8 @@
         <span><i class="dot dark"></i>低照度/接近暗电平</span>
         <span><i class="dot bad"></i>坏点/饱和</span>
       </div>
+
+      <div class="anomalies hidden" id="anomalies" role="status" aria-live="polite"></div>
 
       <div class="metrics" id="metrics">
         <article class="metric">

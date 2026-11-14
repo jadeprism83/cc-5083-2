@@ -1,0 +1,104 @@
+{
+  "confirmedAt": "2026-11-14T07:41:16.382Z",
+  "selected": {
+    "id": "grid@8px",
+    "kind": "grid",
+    "overrides": {
+      "gainModel": "grid",
+      "gridCellPx": 8
+    }
+  },
+  "gates": {
+    "gainErrMax": 0.05,
+    "heldOutFlatnessMin": 0.5,
+    "textureMin": 0.8,
+    "textureMax": 1.25,
+    "lowLightP50Max": 0.15,
+    "lowLightCappedMax": 0.02,
+    "degradedPixelMax": 0.2
+  },
+  "scoreWeights": {
+    "gainErr": 0.3,
+    "heldOut": 0.25,
+    "lowLight": 0.2,
+    "texture": 0.1,
+    "modelBytes": 0.15
+  },
+  "metrics": {
+    "standard": {
+      "gainErr": 0.009387624006569636,
+      "cvBefore": 0.2365240607485085,
+      "cvAfter": 0.04599141010590283,
+      "heldOutCvBefore": 0.23771801228388434,
+      "heldOutCvAfter": 0.05354815084261575,
+      "heldOutDeviation": 0.027366583376584246,
+      "textureRatio": 1.0527131986109497,
+      "lowLightMean": 0.08278309368373528,
+      "lowLightP99": 0.4563424362723355,
+      "lowLightMaxRawGain": 4.313838005065918,
+      "lowLightCappedFraction": 0,
+      "trustedFraction": 0.9923909505208334,
+      "modelBytes": 12288,
+      "denseBytes": 786432,
+      "unfitFraction": 0,
+      "degradedPixelFraction": 0.0055389404296875,
+      "deadNodes": 0,
+      "calibrateMs": 457.8,
+      "applyMsPerImage": 3,
+      "checks": {
+        "flatnessImproved": true,
+        "flatnessReducedByAtLeastHalf": true,
+        "gainMapAccurate": true,
+        "noiseAmplificationBounded": true,
+        "heldOutFlatnessImproved": true,
+        "texturePreserved": true,
+        "lowLightStable": false,
+        "maxNoiseRatio": 3.5871886120996437,
+        "maxAllowedGain": 8
+      }
+    },
+    "stress": {
+      "gainErr": 0.010738366417453772,
+      "cvBefore": 0.3182268828949565,
+      "cvAfter": 0.047647492160713636,
+      "heldOutCvBefore": 0.31935634798196394,
+      "heldOutCvAfter": 0.05779431516399209,
+      "heldOutDeviation": 0.031602230694779396,
+      "textureRatio": 1.0011248913847455,
+      "lowLightMean": 0.016448186097534918,
+      "lowLightP99": 0.3639535534084505,
+      "lowLightMaxRawGain": 5.199531078338623,
+      "lowLightCappedFraction": 0,
+      "trustedFraction": 0.9320322672526041,
+      "modelBytes": 12288,
+      "denseBytes": 786432,
+      "unfitFraction": 0,
+      "degradedPixelFraction": 0.060923258463541664,
+      "deadNodes": 0,
+      "calibrateMs": 399.9,
+      "applyMsPerImage": 2.9,
+      "checks": {
+        "flatnessImproved": true,
+        "flatnessReducedByAtLeastHalf": true,
+        "gainMapAccurate": true,
+        "noiseAmplificationBounded": true,
+        "heldOutFlatnessImproved": true,
+        "texturePreserved": true,
+        "lowLightStable": false,
+        "maxNoiseRatio": 3.917358639778567,
+        "maxAllowedGain": 8
+      }
+    }
+  },
+  "score": {
+    "parts": {
+      "gainErr": 0.1877524801313927,
+      "heldOut": 0.22525912247098975,
+      "lowLight": 0.5518872912249019,
+      "texture": 0.234280882715332,
+      "modelBytes": 0.6936425076239453
+    },
+    "total": 0.35049244731727064
+  },
+  "note": "由 tools/compare-gain-models.js 生成；仅当全部验收门控通过时写入。运行参数搜索不会改动此文件以外的任何已确认参数。"
+}

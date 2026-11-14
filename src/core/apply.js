@@ -248,7 +248,8 @@ function regionTrust(calibration, rect, threshold) {
   let trusted = 0;
   let total = 0;
   let confSum = 0;
-  let capped = 0;
+  let modelUnfit = 0;
+  let gridDegraded = 0;
   let gainSum = 0;
   let gainSamples = 0;
   for (let y = y0; y < y1; y++) {
@@ -256,7 +257,10 @@ function regionTrust(calibration, rect, threshold) {
       const p = y * calibration.width + x;
       const conf = calibration.confidence ? calibration.confidence[p] : 1;
       if (conf >= thresholdValue && !(trustMap && trustMap[p] === 0)) trusted++;
-      if (calibration.flags && (calibration.flags[p] & 16)) capped++;
+      if (calibration.flags) {
+        if (calibration.flags[p] & 16) modelUnfit++;
+        if (calibration.flags[p] & 32) gridDegraded++;
+      }
       confSum += conf;
       for (let c = 0; c < calibration.gain.channels; c++) {
         gainSum += calibration.gain.data[p * calibration.gain.channels + c];
@@ -268,7 +272,8 @@ function regionTrust(calibration, rect, threshold) {
   return {
     trustedFraction: total ? trusted / total : 0,
     meanConfidence: total ? confSum / total : 0,
-    gainCappedFraction: total ? capped / total : 0,
+    modelUnfitFraction: total ? modelUnfit / total : 0,
+    gridDegradedFraction: total ? gridDegraded / total : 0,
     meanGain: gainSamples ? gainSum / gainSamples : 1,
   };
 }

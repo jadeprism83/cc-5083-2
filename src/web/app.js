@@ -89,9 +89,13 @@ function fmtPercent(fraction) {
 function buildOptionsUi() {
   const { fields, defaults } = state.optionsMeta;
   state.options = { ...defaults };
-  const groups = { radiometry: $('radiometryFields'), normalization: $('radiometryFields'), gain: $('gainFields'), trust: $('gainFields') };
+  const groups = {
+    radiometry: $('radiometryFields'), normalization: $('radiometryFields'),
+    gain: $('gainFields'), trust: $('gainFields'), model: $('modelFields'),
+  };
   groups.radiometry.innerHTML = '';
   groups.gain.innerHTML = '';
+  groups.model.innerHTML = '';
   for (const field of fields) {
     const target = groups[field.group];
     if (!target) continue;
@@ -176,6 +180,13 @@ function syncDependentFields() {
   if (pct) pct.closest('.field').style.opacity = mode === 'percentile' ? '1' : '0.45';
   if (dn) dn.closest('.field').style.opacity = mode === 'fixed' ? '1' : '0.45';
   if (darkDn) darkDn.closest('.field').style.opacity = state.options.darkMode === 'manual' ? '1' : '0.45';
+  const model = state.options.gainModel;
+  const gridCell = $('opt-gridCellPx');
+  const basisDegree = $('opt-basisDegree');
+  const basisResidual = $('opt-basisResidualSigma');
+  if (gridCell) gridCell.closest('.field').style.opacity = model === 'grid' ? '1' : '0.45';
+  if (basisDegree) basisDegree.closest('.field').style.opacity = model === 'basis' ? '1' : '0.45';
+  if (basisResidual) basisResidual.closest('.field').style.opacity = model === 'basis' ? '1' : '0.45';
 }
 
 /* ---------------- demo + uploads ---------------- */
@@ -435,7 +446,7 @@ async function calibrate() {
     state.preview = null;
     state.exportSelected = new Set(state.demo ? state.demo.targets.filter((t) => t.startsWith('target_')) : []);
     renderCalibration(data);
-    setStatus('标定完成 · ' + data.summary.referenceCount + ' 帧参考', 'ok');
+    setStatus('标定完成 · ' + gainModelLabel(data.summary) + ' · ' + data.summary.referenceCount + ' 帧参考', 'ok');
     toast('增益已估计，可信区 ' + fmtPercent(data.summary.summary.trustedFraction), 'ok');
     $('exportButton').disabled = false;
     renderExportTargets();
@@ -451,6 +462,7 @@ async function calibrate() {
 function renderCalibrationError(data) {
   state.calibration = null;
   state.calibrationId = null;
+  renderAnomalies([]);
   $('diagnosticHint').textContent = '标定未完成。';
   const text = $('diagnosticText');
   text.innerHTML = '';
@@ -474,7 +486,29 @@ function renderCalibration(data) {
   $('metricMaxGain').textContent = '≤ ' + fmt(summary.gainPolicy.maxGain, 1) + '×';
   $('metricMaxGainNote').textContent = '归一 ' + normalizationLabel(summary);
   renderDiagnostics(data);
+  renderAnomalies(data.anomalies || []);
   if (state.view === 'gain' || state.view === 'trust') renderCalibrationView();
+}
+
+function gainModelLabel(summary) {
+  const model = summary && summary.gainModel;
+  if (!model) return '稠密场';
+  if (model.kind === 'grid') return `网格插值 ${model.params ? model.params.gridCellPx + 'px' : ''}`.trim();
+  if (model.kind === 'basis') return `基函数 ${model.params ? model.params.basisDegree + ' 阶' : ''}`.trim();
+  return '稠密场';
+}
+
+function renderAnomalies(anomalies) {
+  const box = $('anomalies');
+  box.innerHTML = '';
+  if (!anomalies.length) {
+    box.classList.add('hidden');
+    return;
+  }
+  box.classList.remove('hidden');
+  for (const item of anomalies) {
+    box.appendChild(el('span', 'anomaly ' + (item.level || ''), item.text));
+  }
 }
 
 function normalizationLabel(summary) {
@@ -488,13 +522,25 @@ function normalizationLabel(summary) {
 
 function renderDiagnostics(data) {
   const summary = data.summary;
-  $('diagnosticHint').textContent = `参考 ${summary.referenceCount} 帧 · 暗电平 ${summary.darkLevelDn} DN · 归一 ${normalizationLabel(summary)} · 最大倍率 ${summary.gainPolicy.maxGain}×`;
+  $('diagnosticHint').textContent = `参考 ${summary.referenceCount} 帧 · ${gainModelLabel(summary)} · 暗电平 ${summary.darkLevelDn} DN · 归一 ${normalizationLabel(summary)} · 最大倍率 ${summary.gainPolicy.maxGain}×`;
   const text = $('diagnosticText');
   text.innerHTML = '';
 
   const kv = el('div', 'diag-kv');
   const add = (k, v) => { kv.appendChild(el('span', 'k', k)); kv.appendChild(el('span', 'v', v)); };
   add('图像', `${summary.width}×${summary.height} · ${summary.bitDepth} 位 · ${summary.channels} 通道`);
+  add('增益模型', gainModelLabel(summary));
+  if (summary.gainModel && Number.isFinite(summary.gainModel.modelBytes)) {
+    const kb = (summary.gainModel.modelBytes / 1024);
+    const denseKb = (summary.gainModel.denseBytes / 1024);
+    add('模型大小', `${kb < 1 ? summary.gainModel.modelBytes + ' B' : kb.toFixed(1) + ' KiB'}（稠密场 ${denseKb.toFixed(0)} KiB）`);
+  }
+  if (summary.gainModel && Number.isFinite(summary.gainModel.unfitFraction) && summary.gainModel.unfitFraction > 0) {
+    add('MODEL_UNFIT', fmtPercent(summary.gainModel.unfitFraction) + '（基函数无法表达，不强行校正）');
+  }
+  if (summary.gainModel && Number.isFinite(summary.gainModel.degradedPixelFraction) && summary.gainModel.degradedPixelFraction > 0) {
+    add('GRID_DEGRADED', fmtPercent(summary.gainModel.degradedPixelFraction) + '（网格邻点填充）');
+  }
   add('暗电平', `${summary.darkLevelDn} DN（${summary.darkSource.mode === 'darkFrames' ? '暗场' : summary.darkSource.mode === 'manual' ? '手动' : '未扣除'}）`);
   add('饱和阈值', `${summary.saturationThresholdDn} DN`);
   add('增益范围', `${fmt(summary.summary.gainRawMin, 2)} – ${fmt(summary.summary.gainRawMax, 2)} ×`);
@@ -584,6 +630,7 @@ function maybeAutoPreview() {
 function renderRefusal(data) {
   state.images = null;
   state.refused = true;
+  renderAnomalies([]);
   $('viewerEmpty').classList.remove('hidden');
   const empty = $('viewerEmpty');
   empty.innerHTML = '';
@@ -651,6 +698,7 @@ function renderPreview(data) {
   const cappedFraction = (counts.gainCapped || 0) / (data.target.width * data.target.height);
   $('rightBadge').textContent = `补偿后 · 封顶 ${fmtPercent(cappedFraction)} · 最高 ×${fmt(data.application.maxAppliedGain, 2)}`;
   $('rightBadge').className = 'badge ' + (cappedFraction > 0 ? 'warn' : 'ok');
+  renderAnomalies(data.anomalies || []);
 
   drawProfile(data);
   renderRegionTable(data);
@@ -994,12 +1042,25 @@ function showValidation(data) {
   const text = $('diagnosticText');
   text.innerHTML = '';
   const block = el('div', 'diag-block');
-  block.appendChild(el('h3', '', '合成验证（已知渐晕与局部遮光）'));
+  const modelKind = data.calibration && data.calibration.gainModel ? data.calibration.gainModel.kind : 'field';
+  block.appendChild(el('h3', '', `合成验证（已知渐晕与局部遮光 · ${modelKind} 模型）`));
   const kv = el('div', 'diag-kv');
   const add = (k, v) => { kv.appendChild(el('span', 'k', k)); kv.appendChild(el('span', 'v', v)); };
   add('增益平均相对误差', fmt(data.gainAccuracy.meanAbsRelativeError * 100, 2) + '%');
   add('均匀度 CV 校正前', fmt(data.uniformity.uniformityCvBefore, 3));
   add('均匀度 CV 校正后', fmt(data.uniformity.uniformityCvAfter, 3));
+  if (data.heldOut) {
+    add('留出帧 CV（未参与估计）', `${fmt(data.heldOut.cvBefore, 3)} → ${fmt(data.heldOut.cvAfter, 3)}`);
+  }
+  if (data.texture) {
+    add('纹理保持比', fmt(data.texture.ratio, 3) + '（1 为无损伤）');
+  }
+  if (data.lowLight) {
+    add('低亮度区增益误差', `均值 ${fmt(data.lowLight.meanRelativeError * 100, 1)}% · P99 ${fmt(data.lowLight.p99RelativeError * 100, 1)}% · 最高 ${fmt(data.lowLight.maxRawGain, 2)}×`);
+  }
+  if (data.timing) {
+    add('耗时', `标定 ${fmt(data.timing.calibrateMs, 0)} ms · 应用 ${fmt(data.timing.applyMs, 1)} ms/张`);
+  }
   add('噪声放大最大', '×' + fmt(data.checks.maxNoiseRatio, 2));
   add('最大允许倍率', data.checks.maxAllowedGain + '×');
   for (const region of data.regions) {

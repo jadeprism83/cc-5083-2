@@ -32,6 +32,10 @@ function usage() {
   --max-gain <x>  --min-gain <x>  --smooth-px <px>
   --outlier-sigma <s>  --min-frames <n>  --bad-pixel-sigma <s>
   --low-signal-factor <s>  --confidence <0..1>
+  --gain-model field|grid|basis   增益表示（默认 grid，见 docs/gain-model-comparison.md）
+  --grid-cell <px>                网格控制点间距（grid）
+  --basis-degree <n>              log 多项式阶数（basis）
+  --basis-residual-sigma <s>      基函数残差阈值（basis）
   --options <json|@file>   （整体覆盖以上选项）
   --dark-frames <路径...>  --label <名称>
 
@@ -88,6 +92,10 @@ function parseFlags(argv) {
       'bad-pixel-sigma': { type: 'string' },
       'low-signal-factor': { type: 'string' },
       confidence: { type: 'string' },
+      'gain-model': { type: 'string' },
+      'grid-cell': { type: 'string' },
+      'basis-degree': { type: 'string' },
+      'basis-residual-sigma': { type: 'string' },
       'require-radiometry': { type: 'boolean' },
       csv: { type: 'boolean' },
       json: { type: 'boolean' },
@@ -129,6 +137,8 @@ function optionsFromFlags(values) {
     ['badPixelSigma', values['bad-pixel-sigma']],
     ['lowSignalFactor', values['low-signal-factor']],
     ['confidenceThreshold', values.confidence],
+    ['gridCellPx', values['grid-cell']],
+    ['basisResidualSigma', values['basis-residual-sigma']],
   ];
   for (const [key, value] of numeric) {
     if (value !== undefined) {
@@ -137,7 +147,12 @@ function optionsFromFlags(values) {
       base[key] = n;
     }
   }
-  const modeMap = { 'dark-mode': 'darkMode', 'norm-mode': 'normalizationMode' };
+  if (values['basis-degree'] !== undefined) {
+    const n = Number(values['basis-degree']);
+    if (!Number.isInteger(n)) fail(`--basis-degree 需要整数，收到 ${values['basis-degree']}`);
+    base.basisDegree = n;
+  }
+  const modeMap = { 'dark-mode': 'darkMode', 'norm-mode': 'normalizationMode', 'gain-model': 'gainModel' };
   for (const [flag, key] of Object.entries(modeMap)) {
     if (values[flag] !== undefined) base[key] = values[flag];
   }
@@ -188,6 +203,7 @@ function commandCalibrate(values, positionals) {
   const output = {
     ok: true,
     calibrationDir: values.out,
+    gainModel: stored.record.gainModel,
     summary: stored.record.summary,
     darkSource: stored.record.darkSource,
     normalization: stored.record.normalization,
@@ -336,6 +352,11 @@ function commandValidate(values) {
     scenario: validation.scenario,
     gainAccuracy: validation.gainAccuracy,
     uniformity: validation.uniformity,
+    heldOut: validation.heldOut,
+    texture: validation.texture,
+    lowLight: validation.lowLight,
+    timing: validation.timing,
+    gainModel: validation.calibration ? validation.calibration.gainModel : null,
     checks: validation.checks,
     regions: validation.regions.map((r) => ({
       label: r.label,
@@ -378,6 +399,7 @@ function commandInspect(values) {
     darkSource: record.darkSource,
     saturationThresholdDn: record.saturationThresholdDn,
     normalization: record.normalization,
+    gainModel: record.gainModel || { kind: 'field', note: 'schemaVersion 3 标定，无紧凑模型' },
     gainPolicy: record.gainPolicy,
     refinement: record.refinement,
     options: record.options,

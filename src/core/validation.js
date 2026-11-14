@@ -126,7 +126,109 @@ function noiseRatio(regionBefore, regionAfter) {
   };
 }
 
+function nowMs() {
+  return Number(process.hrtime.bigint()) / 1e6;
+}
+
+// Flatness of the held-out reference frame (never used in the estimation).
+// Before/after are measured against the known uniform truth level, so the
+// numbers say how flat an unseen image becomes, not just the training flats.
+function heldOutFlatness(scenario, calibration, heldOutImage, settings, scale) {
+  const application = applyFlat(calibration.record, calibration, heldOutImage, { targetSettings: settings });
+  const w = scenario.geometry.width;
+  const h = scenario.geometry.height;
+  const expected = scenario.lightLevel * scale;
+  let n = 0;
+  let beforeSum = 0;
+  let beforeSq = 0;
+  let afterSum = 0;
+  let afterSq = 0;
+  let afterDev = 0;
+  for (let p = 0; p < w * h; p++) {
+    if (!application.trusted[p]) continue;
+    const before = heldOutImage.data[p] - scenario.darkLevel;
+    const after = application.output.data[p] - scenario.darkLevel;
+    beforeSum += before;
+    beforeSq += before * before;
+    afterSum += after;
+    afterSq += after * after;
+    afterDev += Math.abs(after - expected) / expected;
+    n++;
+  }
+  const cvOf = (sum, sq, count) => {
+    const mean = sum / count;
+    return Math.sqrt(Math.max(0, sq / count - mean * mean)) / mean;
+  };
+  return {
+    framesUsedForEstimation: scenario.references.length - 1,
+    cvBefore: cvOf(beforeSum, beforeSq, n),
+    cvAfter: cvOf(afterSum, afterSq, n),
+    meanAbsDeviationFromTruth: n ? afterDev / n : NaN,
+    trustedFraction: application.trustedFraction,
+    samples: n,
+  };
+}
+
+// Texture damage check on the resolution-chart region: the high-pass residual
+// of a corrected textured image must scale with the applied gain. A ratio
+// below 1 means the correction flattened real texture; far above 1 means
+// noise is being over-amplified relative to the gain actually applied.
+function texturePreservation(scenario, application) {
+  const w = scenario.geometry.width;
+  const h = scenario.geometry.height;
+  const rect = {
+    x: Math.round(w * 0.62), y: Math.round(h * 0.2),
+    w: Math.round(w * 0.2), h: Math.round(h * 0.25),
+  };
+  const before = regionStats(scenario.target, rect);
+  const after = regionStats(application.output, rect);
+  const gainMean = meanAppliedGain(application, rect);
+  const ratio = before.highPassNoiseDn > 0 && gainMean > 0
+    ? after.highPassNoiseDn / (before.highPassNoiseDn * gainMean)
+    : NaN;
+  return {
+    rect,
+    beforeHighPassDn: before.highPassNoiseDn,
+    afterHighPassDn: after.highPassNoiseDn,
+    meanAppliedGain: gainMean,
+    ratio,
+  };
+}
+
+// Gain stability where the reference is dim (truth gain >= 2): the estimate
+// must stay close to the truth and must not run into the gain cap.
+function lowLightStability(scenario, calibration, scale) {
+  const w = scenario.geometry.width;
+  const h = scenario.geometry.height;
+  const errors = [];
+  let maxRawGain = 0;
+  let capped = 0;
+  const cap = calibration.record.gainPolicy.maxGain;
+  for (let p = 0; p < w * h; p++) {
+    const truth = scenario.gainTruth[p];
+    if (truth < 2) continue;
+    let g = 0;
+    for (let c = 0; c < calibration.gain.channels; c++) g += calibration.gain.data[p * calibration.gain.channels + c];
+    g /= calibration.gain.channels;
+    if (g > maxRawGain) maxRawGain = g;
+    if (g > cap) capped++;
+    errors.push(Math.abs((g / scale) / truth - 1));
+  }
+  errors.sort((a, b) => a - b);
+  const mean = errors.length ? errors.reduce((a, b) => a + b, 0) / errors.length : NaN;
+  const p99 = errors.length ? errors[Math.min(errors.length - 1, Math.floor(errors.length * 0.99))] : NaN;
+  return {
+    samples: errors.length,
+    meanRelativeError: mean,
+    p99RelativeError: p99,
+    maxRawGain,
+    cappedFraction: errors.length ? capped / errors.length : 0,
+    cap,
+  };
+}
+
 function buildValidation(options, scenarioParams = {}) {
+  const t0 = nowMs();
   const scenario = buildScenario(scenarioParams);
   const settings = {
     device: 'synthetic-camera',
@@ -138,21 +240,33 @@ function buildValidation(options, scenarioParams = {}) {
     iso: 100,
     exposureMs: 10,
   };
-  const references = scenario.references.map((image, i) => ({ name: `参考_${i + 1}.png`, image, settings }));
+  // The last reference frame is held out of the estimation so flatness can be
+  // verified on an image the model has never seen.
+  const useHoldout = scenarioParams.holdout !== false && scenario.references.length >= 3;
+  const estimationRefs = useHoldout ? scenario.references.slice(0, -1) : scenario.references;
+  const heldOutImage = useHoldout ? scenario.references[scenario.references.length - 1] : null;
+  const references = estimationRefs.map((image, i) => ({ name: `参考_${i + 1}.png`, image, settings }));
+  const tCal0 = nowMs();
   const calibration = calibrate({ references }, options);
+  const calibrateMs = nowMs() - tCal0;
   if (!calibration.ok) {
     return { ok: false, stage: 'calibrate', errors: calibration.errors, warnings: calibration.warnings, scenario: summarizeScenario(scenario) };
   }
+  const tApply0 = nowMs();
   let application;
   try {
     application = applyFlat(calibration.record, calibration, scenario.target, { targetSettings: settings });
   } catch (err) {
     return { ok: false, stage: 'apply', errors: [err.message, ...(err.details || [])], warnings: calibration.warnings, scenario: summarizeScenario(scenario) };
   }
+  const applyMs = nowMs() - tApply0;
 
   const scale = globalScale(scenario, application, calibration);
   const gainError = gainMapError(scenario, application, calibration, scale);
   const uniformity = flatness(scenario, application, calibration, scale);
+  const heldOut = heldOutImage ? heldOutFlatness(scenario, calibration, heldOutImage, settings, scale) : null;
+  const texture = texturePreservation(scenario, application);
+  const lowLight = lowLightStability(scenario, calibration, scale);
   const regions = DEFAULT_REGIONS.map((rect) => {
     const before = regionStats(scenario.target, rect);
     const after = regionStats(application.output, rect);
@@ -199,6 +313,7 @@ function buildValidation(options, scenarioParams = {}) {
       darkLevelDn: calibration.record.darkLevelDn,
       darkSource: calibration.record.darkSource,
       normalization: calibration.record.normalization,
+      gainModel: calibration.record.gainModel,
       warnings: calibration.warnings,
       summary: calibration.record.summary,
       channelStatistics: calibration.record.channelStatistics,
@@ -211,6 +326,14 @@ function buildValidation(options, scenarioParams = {}) {
     },
     gainAccuracy: gainError,
     uniformity,
+    heldOut,
+    texture,
+    lowLight,
+    timing: {
+      calibrateMs: Math.round(calibrateMs * 10) / 10,
+      applyMs: Math.round(applyMs * 10) / 10,
+      totalMs: Math.round((nowMs() - t0) * 10) / 10,
+    },
     regions,
     profiles,
     checks: {
@@ -218,6 +341,9 @@ function buildValidation(options, scenarioParams = {}) {
       flatnessReducedByAtLeastHalf: uniformity.reductionFactor < 0.5,
       gainMapAccurate: gainError.meanAbsRelativeError < 0.05,
       noiseAmplificationBounded: maxNoiseRatio <= caps * 1.02,
+      heldOutFlatnessImproved: heldOut ? heldOut.cvAfter < heldOut.cvBefore : null,
+      texturePreserved: Number.isFinite(texture.ratio) ? texture.ratio >= 0.8 && texture.ratio <= 1.25 : null,
+      lowLightStable: Number.isFinite(lowLight.p99RelativeError) ? lowLight.p99RelativeError < 0.25 : null,
       maxNoiseRatio,
       maxAllowedGain: caps,
     },

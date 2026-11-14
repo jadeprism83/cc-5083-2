@@ -20,12 +20,15 @@ const {
   highPassNoiseSigma,
 } = require('./stats');
 const { SETTINGS_SCHEMA } = require('./options');
+const { fitGainModel, modelSizeBytes, MODEL_LABELS, MAX_HOPS } = require('./gainmodel');
 
 const FLAGS = {
   NO_VALID_VIEW: 1,   // not enough usable frames at this pixel
   SATURATED: 2,       // clipped in every used reference frame
   BAD_PIXEL: 4,       // spatially incoherent defect
   LOW_SIGNAL: 8,      // valid but close to the sensor noise floor
+  MODEL_UNFIT: 16,    // basis model cannot express this local occlusion
+  GRID_DEGRADED: 32,  // grid node filled from neighbours (sparse invalid region)
   FILLED: 64,         // gain borrowed from neighbouring reliable pixels
   DEAD: 128,          // no supported gain estimate at all
 };
@@ -35,6 +38,8 @@ const FLAG_LABELS = {
   SATURATED: '参考帧饱和（无有效观测）',
   BAD_PIXEL: '坏点',
   LOW_SIGNAL: '低照度（限制放大）',
+  MODEL_UNFIT: '基函数无法表达的局部遮光（不强行校正）',
+  GRID_DEGRADED: '网格节点由邻点填充（稀疏无效区）',
   FILLED: '增益由邻近可靠区填充',
   DEAD: '无有效增益估计',
 };
@@ -429,6 +434,8 @@ function calibrate(group, options, context) {
   const noiseDn = new Float32Array(pixelCount * channels);
   const normalizationPerChannel = [];
   const channelSummaries = [];
+  const modelDataChannels = [];
+  const modelStatsChannels = [];
 
   for (let c = 0; c < channels; c++) {
     const combined = combineFrames(refs, c, darkDn, satThreshold, options);
@@ -480,6 +487,27 @@ function calibrate(group, options, context) {
       return { ok: false, errors: [`通道 ${c + 1} 的归一化基准无效（${basisSignal}）`], warnings };
     }
 
+    // Reliable pixels carry the gain observation; its weight mirrors the
+    // observation-quality confidence so noisy or thinly supported samples
+    // influence the model less.
+    const obsGain = new Float32Array(pixelCount);
+    const obsWeight = new Float32Array(pixelCount);
+    const baseConf = new Float32Array(pixelCount);
+    for (let p = 0; p < pixelCount; p++) {
+      if (supported[p] && smoothed.values[p] > 0) obsGain[p] = basisSignal / smoothed.values[p];
+      const countFactor = clamp(combined.accepted[p] / refs.length, 0.15, 1);
+      const snrFactor = smoothstep(options.lowSignalFactor * 0.5, options.lowSignalFactor * 2, snr[p]);
+      const supportFactor = smoothstep(0.35, 0.7, support[p]);
+      const pixelConf = countFactor * snrFactor * supportFactor;
+      baseConf[p] = supported[p] ? (valid[p] ? pixelConf : pixelConf * 0.45) : 0;
+      if (reliable[p]) obsWeight[p] = pixelConf;
+    }
+    const model = fitGainModel(options.gainModel, {
+      obsGain, weight: obsWeight, mask: reliable, supported, basisSignal,
+    }, width, height, options);
+    modelDataChannels.push(model.modelData);
+    modelStatsChannels.push(model.stats);
+
     let gainSum = 0;
     let gainCount = 0;
     let cappedCandidate = 0;
@@ -488,21 +516,26 @@ function calibrate(group, options, context) {
     let filledCount = 0;
     let badCount = 0;
     let saturatedDead = 0;
+    let modelUnfitCount = 0;
+    let gridDegradedCount = 0;
 
     for (let p = 0; p < pixelCount; p++) {
-      const signalValue = smoothed.values[p];
       let pixelFlags = 0;
-      let rawGain = 1;
+      const rawGain = model.gain[p];
       if (combined.saturatedFrames[p] === refs.length) pixelFlags |= FLAGS.SATURATED;
       if (bad[p]) { pixelFlags |= FLAGS.BAD_PIXEL; badCount++; }
-      if (supported[p]) {
-        rawGain = basisSignal / signalValue;
-        if (rawGain > options.maxGain) { cappedCandidate++; }
-      } else {
+      const modelFlag = model.modelFlags ? model.modelFlags[p] : 0;
+      const dead = (options.gainModel === 'field' && !supported[p]) || (modelFlag & 2) !== 0;
+      if (dead) {
         pixelFlags |= FLAGS.DEAD;
-        rawGain = 1;
         deadCount++;
         if (combined.saturatedFrames[p] === refs.length) saturatedDead++;
+      } else if (rawGain > options.maxGain) {
+        cappedCandidate++;
+      }
+      if (modelFlag & 1) {
+        if (options.gainModel === 'basis') { pixelFlags |= FLAGS.MODEL_UNFIT; modelUnfitCount++; }
+        else if (options.gainModel === 'grid') { pixelFlags |= FLAGS.GRID_DEGRADED; gridDegradedCount++; }
       }
       if (!valid[p]) {
         pixelFlags |= FLAGS.NO_VALID_VIEW;
@@ -521,14 +554,15 @@ function calibrate(group, options, context) {
         gainCount++;
       }
 
-      let conf = 0;
-      if (supported[p]) {
-        const countFactor = clamp(combined.accepted[p] / refs.length, 0.15, 1);
-        const snrFactor = smoothstep(options.lowSignalFactor * 0.5, options.lowSignalFactor * 2, snr[p]);
-        const supportFactor = smoothstep(0.35, 0.7, support[p]);
-        const pixelConf = countFactor * snrFactor * supportFactor;
-        conf = valid[p] ? pixelConf : pixelConf * 0.45;
-      }
+      // Model confidence modulates the observation confidence. For grid/basis
+      // the model supplies a neighbourhood estimate where the local
+      // observation is missing (saturated, bad, unsupported), so those pixels
+      // keep the historical 0.45 fill factor times the model confidence
+      // instead of collapsing to zero. The field model is byte-identical to
+      // the old behaviour (baseConf, zero where unsupported).
+      const conf = options.gainModel === 'field'
+        ? baseConf[p]
+        : (valid[p] ? baseConf[p] : 0.45) * model.modelConfidence[p];
       if (c === 0) {
         confidence[p] = conf;
         flags[p] = pixelFlags;
@@ -556,6 +590,8 @@ function calibrate(group, options, context) {
       saturatedDeadFraction: saturatedDead / pixelCount,
       lowSignalFraction: lowSignalCount / pixelCount,
       cappedCandidateFraction: cappedCandidate / pixelCount,
+      modelUnfitFraction: modelUnfitCount / pixelCount,
+      gridDegradedFraction: gridDegradedCount / pixelCount,
       meanFrameNoiseDn: meanOf(refs.map((r) => r.noiseSigma[c])),
       meanGainTrusted: gainCount ? gainSum / gainCount : 1,
       gainRawMin: Number.isFinite(gainMin) ? gainMin : 1,
@@ -578,8 +614,56 @@ function calibrate(group, options, context) {
     if (!excluded && confidence[p] >= options.confidenceThreshold) trustedCount++;
   }
 
+  const gainModelKind = options.gainModel;
+  const sizes = modelSizeBytes(
+    gainModelKind,
+    gainModelKind === 'grid'
+      ? { nodes: modelDataChannels.flatMap((m) => m.nodes || []) }
+      : gainModelKind === 'basis'
+        ? { coefficients: modelDataChannels.flatMap((m) => m.coefficients || []) }
+        : null,
+    pixelCount,
+    channels,
+  );
+  const gainModelRecord = {
+    kind: gainModelKind,
+    label: MODEL_LABELS[gainModelKind] || gainModelKind,
+    params: {
+      gridCellPx: options.gridCellPx,
+      basisDegree: options.basisDegree,
+      basisResidualSigma: options.basisResidualSigma,
+    },
+    modelBytes: sizes.modelBytes,
+    denseBytes: sizes.denseBytes,
+    channels: modelStatsChannels,
+  };
+  const unfitFraction = meanOf(modelStatsChannels.map((s) => s.unfitFraction || 0));
+  const degradedFraction = meanOf(modelStatsChannels.map((s) => s.degradedPixelFraction || 0));
+  if (gainModelKind === 'basis') {
+    gainModelRecord.unfitFraction = unfitFraction;
+    if (unfitFraction > 0.03) {
+      warnings.push(
+        `基函数模型无法表达 ${(unfitFraction * 100).toFixed(1)}% 像素的局部遮光（已标记 MODEL_UNFIT 并降低可信度，不强行校正）；` +
+        '若这些区域需要校正，请改用网格插值或稠密场模型。',
+      );
+    }
+  }
+  if (gainModelKind === 'grid') {
+    gainModelRecord.degradedPixelFraction = degradedFraction;
+    const deadNodes = modelStatsChannels.reduce((acc, s) => acc + (s.deadNodes || 0), 0);
+    if (degradedFraction > 0.05) {
+      warnings.push(
+        `稀疏无效区导致 ${(degradedFraction * 100).toFixed(1)}% 像素的网格节点由邻点填充（GRID_DEGRADED，可信度随跳数衰减）；` +
+        '请检查参考组饱和/遮挡比例，或增大网格间距。',
+      );
+    }
+    if (deadNodes > 0) {
+      warnings.push(`网格模型有 ${deadNodes} 个控制点在 ${MAX_HOPS} 跳内无有效邻点，增益保持 1 并标记 DEAD。`);
+    }
+  }
+
   const record = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     id: context && context.id ? context.id : null,
     createdAt: new Date().toISOString(),
     width, height, bitDepth, channels,
@@ -594,6 +678,7 @@ function calibrate(group, options, context) {
       fixedDn: options.normalizationMode === 'fixed' ? options.normalizationDn : null,
       perChannel: normalizationPerChannel,
     },
+    gainModel: gainModelRecord,
     gainPolicy: {
       maxGain: options.maxGain,
       minGain: options.minGain,
@@ -638,6 +723,10 @@ function calibrate(group, options, context) {
     confidence,
     flags,
     noiseDn,
+    gainModelData: {
+      kind: gainModelKind,
+      channels: modelDataChannels,
+    },
     flagLabels: FLAG_LABELS,
     applyFlagLabels: APPLY_FLAG_LABELS,
   };
